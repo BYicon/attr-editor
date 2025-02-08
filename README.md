@@ -52,3 +52,8 @@ const attrEditor = new AttrEditor({
 });
 
 ```
+
+### 预览
+
+![预览](./preview.png)
+
