@@ -48,7 +48,7 @@ interface ValidationError {
 interface TableColumn {
   key: string;
   title: string;
-  type: 'input' | 'select' | 'number';
+  type: 'input' | 'select' | 'number' | 'image';
   required?: boolean;
   options?: SelectOption[];
   placeholder?: string;
@@ -56,11 +56,26 @@ interface TableColumn {
   max?: number;
   step?: number;
   defaultValue?: string | number;
+  accept?: string;
+  maxSize?: number;
+  uploadConfig?: ImageUploadConfig;
 }
 
 interface SelectOption {
   label: string;
   value: string | number;
+}
+
+// 添加图片上传配置接口
+interface ImageUploadConfig {
+  url: string;  // 上传地址
+  previewDomain?: string;  // 预览域名，如: 'https://img.example.com'
+  formData?: { [key: string]: string };  // 额外的表单参数
+  headers?: { [key: string]: string };  // 请求头
+  fieldName?: string;  // 文件字段名，默认为 'file'
+  onProgress?: (percent: number) => void;  // 上传进度回调
+  onSuccess?: (response: any) => string;  // 上传成功回调，返回图片URL
+  onError?: (error: any) => void;  // 上传失败回调
 }
 
 class AttrEditor {
@@ -205,12 +220,59 @@ class AttrEditor {
     `;
   }
 
+  private getImageUrl(path: string | string[], column: TableColumn): string {
+    // 如果是数组，返回空字符串
+    if (Array.isArray(path)) {
+      return '';
+    }
+    
+    if (!path) return '';
+    
+    // 如果是 base64 或完整 URL，直接返回
+    if (path.startsWith('data:') || path.startsWith('http')) {
+      return path;
+    }
+    
+    return path;
+  }
+
   private renderTableCell(column: TableColumn, item: CombinationItem): string {
-    const value = (item[column.key] as string) || '';
+    const value = item[column.key];
     const showError = this.showValidation && column.required && !value;
 
     let input = '';
     switch (column.type) {
+      case 'image':
+        const imageUrl = this.getImageUrl(value, column);
+        input = `
+          <div class="anty-image-upload">
+            ${imageUrl ? `
+              <div class="anty-image-preview">
+                <img src="${column.uploadConfig?.previewDomain || ''}${imageUrl}" alt="预览图" />
+                <span class="anty-image-remove" data-key="${column.key}">&times;</span>
+              </div>
+            ` : ''}
+            <div class="anty-upload-button">
+              <input 
+                type="file"
+                class="anty-file-input"
+                data-key="${column.key}"
+                accept="${column.accept || 'image/*'}"
+                ${imageUrl ? 'style="display: none;"' : ''}
+              />
+              ${!imageUrl ? `
+                <button class="anty-btn anty-btn-default">
+                  <i class="anty-icon anty-icon-upload"></i>
+                  上传图片
+                </button>
+              ` : ''}
+            </div>
+          </div>
+          ${showError ? 
+            `<div class="anty-form-error-msg">请上传${column.title}</div>` : 
+            ''}
+        `;
+        break;
       case 'select':
         input = `
           <select 
@@ -255,9 +317,6 @@ class AttrEditor {
       <td class="anty-table-cell">
         <div class="anty-form-item ${showError ? 'anty-form-item-error' : ''}">
           ${input}
-          ${showError ? 
-            `<div class="anty-form-error-msg">请输入${column.title}</div>` : 
-            ''}
         </div>
       </td>
     `;
@@ -323,6 +382,44 @@ class AttrEditor {
       });
     
     return result;
+  }
+
+  private async uploadImage(file: File, config: ImageUploadConfig): Promise<string> {
+    const formData = new FormData();
+    formData.append(config.fieldName || 'file', file);
+    
+    // 添加额外的表单参数
+    if (config.formData) {
+      Object.entries(config.formData).forEach(([key, value]) => {
+        formData.append(key, value);
+      });
+    }
+
+    try {
+      const response = await fetch(config.url, {
+        method: 'POST',
+        headers: config.headers || {},
+        body: formData
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      console.log('data 🚀🚀🚀', data);
+      // 使用 onSuccess 回调处理响应数据
+      if (config.onSuccess) {
+        return config.onSuccess(data);
+      }
+      
+      return data.url || data.filePath; // 默认返回响应中的 url 字段
+    } catch (error) {
+      if (config.onError) {
+        config.onError(error);
+      }
+      throw error;
+    }
   }
 
   private bindEvents(): void {
@@ -489,6 +586,147 @@ class AttrEditor {
             if (oldValue !== target.value) {
               this.notifyChange();
             }
+          }
+        }
+      }
+    });
+
+    // 修改文件上传事件处理
+    this.container.addEventListener('change', async (e) => {
+      const target = e.target as HTMLInputElement;
+      if (target.classList.contains('anty-file-input')) {
+        const file = target.files?.[0];
+        if (file) {
+          const key = target.getAttribute('data-key');
+          const row = target.closest('tr');
+          if (key && row) {
+            const combinationId = row.getAttribute('data-id');
+            const combination = this.combinations.find(c => c.id === combinationId);
+            const column = this.columns.find(col => col.key === key);
+            
+            if (combination && column) {
+              // 检查文件大小
+              if (column.maxSize && file.size > column.maxSize * 1024) {
+                alert(`图片大小不能超过 ${column.maxSize}KB`);
+                return;
+              }
+
+              const cell = target.closest('.anty-table-cell');
+              if (!cell) return;
+
+              const imageUpload = cell.querySelector('.anty-image-upload');
+              if (!imageUpload) return;
+
+              try {
+                // 显示上传中状态
+                imageUpload.innerHTML = `
+                  <div class="anty-upload-loading">
+                    <div class="anty-upload-loading-icon"></div>
+                    <span>上传中...</span>
+                  </div>
+                `;
+
+                let imageUrl: string;
+
+                // 如果配置了上传
+                if (column.uploadConfig) {
+                  // 上传图片
+                  imageUrl = await this.uploadImage(file, column.uploadConfig);
+                  console.log('imageUrl 🚀🚀🚀', imageUrl);
+                  console.log('key 🚀🚀🚀', key);
+                  console.log('combination[key] 🚀🚀🚀', combination[key]);
+                  combination[key] = imageUrl;
+                } else {
+                  // 本地预览模式
+                  imageUrl = await new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                      resolve(event.target?.result as string);
+                    };
+                    reader.readAsDataURL(file);
+                  });
+                  combination[key] = imageUrl;
+                }
+
+                // 更新预览
+                imageUpload.innerHTML = `
+                  <div class="anty-image-preview">
+                    <img src="${column.uploadConfig?.previewDomain || ''}${this.getImageUrl(combination[key], column)}" alt="预览图" />
+                    <span class="anty-image-remove" data-key="${key}">&times;</span>
+                  </div>
+                  <div class="anty-upload-button" style="display: none;">
+                    <input 
+                      type="file"
+                      class="anty-file-input"
+                      data-key="${key}"
+                      accept="${column.accept || 'image/*'}"
+                    />
+                  </div>
+                `;
+                
+                this.notifyChange();
+              } catch (error) {
+                console.error('Upload failed:', error);
+                alert('图片上传失败，请重试');
+                
+                // 上传失败时恢复上传按钮
+                imageUpload.innerHTML = `
+                  <div class="anty-upload-button">
+                    <input 
+                      type="file"
+                      class="anty-file-input"
+                      data-key="${key}"
+                      accept="${column.accept || 'image/*'}"
+                    />
+                    <button class="anty-btn anty-btn-default">
+                      <i class="anty-icon anty-icon-upload"></i>
+                      上传图片
+                    </button>
+                  </div>
+                `;
+              }
+            }
+          }
+        }
+      }
+    });
+
+    // 添加图片删除事件处理
+    this.container.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      if (target.classList.contains('anty-image-remove')) {
+        const key = target.getAttribute('data-key');
+        const row = target.closest('tr');
+        if (key && row) {
+          const combinationId = row.getAttribute('data-id');
+          const combination = this.combinations.find(c => c.id === combinationId);
+          if (combination) {
+            combination[key] = '';
+            
+            // 更新显示
+            const cell = target.closest('.anty-table-cell');
+            if (cell) {
+              const imageUpload = cell.querySelector('.anty-image-upload');
+              if (imageUpload) {
+                const column = this.columns.find(col => col.key === key);
+                imageUpload.innerHTML = `
+                  <div class="anty-upload-button">
+                    <input 
+                      type="file"
+                      class="anty-file-input"
+                      data-key="${key}"
+                      accept="${column?.accept || 'image/*'}"
+                    />
+                    <button class="anty-btn anty-btn-default">
+                      <i class="anty-icon anty-icon-upload"></i>
+                      上传图片
+                    </button>
+                  </div>
+                `;
+              }
+            }
+            
+            this.notifyChange();
           }
         }
       }
